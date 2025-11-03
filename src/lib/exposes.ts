@@ -887,11 +887,11 @@ export const options = {
             .withFeature(new Numeric("interval", access.SET).withValueMin(0).withUnit("ms").withDescription("Interval duration")),
     no_occupancy_since_true: () =>
         new List("no_occupancy_since", access.SET, new Numeric("time", access.STATE_SET)).withDescription(
-            'Sends a message the last time occupancy (occupancy: true) was detected. When setting this for example to [10, 60] a `{"no_occupancy_since": 10}` will be send after 10 seconds and a `{"no_occupancy_since": 60}` after 60 seconds.',
+            'Sends a message the last time occupancy (occupancy: true) was detected. When setting this for example to [10, 60] a `{"no_occupancy_since": 10}` will be sent after 10 seconds and a `{"no_occupancy_since": 60}` after 60 seconds.',
         ),
     no_occupancy_since_false: () =>
         new List("no_occupancy_since", access.SET, new Numeric("time", access.STATE_SET)).withDescription(
-            'Sends a message after the last time no occupancy (occupancy: false) was detected. When setting this for example to [10, 60] a `{"no_occupancy_since": 10}` will be send after 10 seconds and a `{"no_occupancy_since": 60}` after 60 seconds.',
+            'Sends a message after the last time no occupancy (occupancy: false) was detected. When setting this for example to [10, 60] a `{"no_occupancy_since": 10}` will be sent after 10 seconds and a `{"no_occupancy_since": 60}` after 60 seconds.',
         ),
     presence_timeout: () =>
         new Numeric("presence_timeout", access.SET)
@@ -1339,7 +1339,7 @@ export const presets = {
             .withDescription("Measured electrical potential value on phase C"),
     water_leak: () => new Binary("water_leak", access.STATE, true, false).withDescription("Indicates whether the device detected a water leak"),
     pilot_wire_mode: (values = ["comfort", "eco", "frost_protection", "off", "comfort_-1", "comfort_-2"]) =>
-        new Enum("pilot_wire_mode", access.ALL, ["comfort", "eco", "frost_protection", "off", "comfort_-1", "comfort_-2"]).withDescription(
+        new Enum("pilot_wire_mode", access.ALL, values).withDescription(
             "Controls the target temperature of the heater, with respect to the temperature set on that heater. Possible values: comfort (target temperature = heater set temperature) eco (target temperature = heater set temperature - 3.5°C), frost_protection (target temperature = 7 to 8°C), off (heater stops heating), and the less commonly used comfort_-1 (target temperature = heater set temperature - 1°C), comfort_-2 (target temperature = heater set temperature - 2°C),.",
         ),
     rain: () => new Binary("rain", access.STATE, true, false).withDescription("Indicates whether the device detected rainfall"),
