@@ -1,5 +1,5 @@
 import {Zcl} from "zigbee-herdsman";
-
+import type {MiboxerZone} from "zigbee-herdsman/dist/zspec/zcl/definition/tstype";
 import * as fz from "../converters/fromZigbee";
 import * as tz from "../converters/toZigbee";
 import * as constants from "./constants";
@@ -33,6 +33,55 @@ const ea = exposes.access;
 
 interface KeyValueStringEnum {
     [s: string]: Enum;
+}
+
+export interface TuyaGenBasic {
+    attributes: never;
+    commands: {
+        tuyaSetup: Record<string, never>;
+    };
+    commandResponses: never;
+}
+
+export interface TuyaGenGroups {
+    attributes: never;
+    commands: {
+        miboxerSetZones: {
+            zones: MiboxerZone[];
+        };
+    };
+    commandResponses: never;
+}
+
+export interface TuyaGenOnOff {
+    attributes: {
+        tuyaBacklightSwitch: number;
+        tuyaBacklightMode: number;
+        moesStartUpOnOff: number;
+        tuyaOperationMode: number;
+    };
+    commands: {
+        tuyaCountdown: {data: Buffer};
+        tuyaAction2: {
+            value: number;
+        };
+        tuyaAction: {
+            value: number;
+            data: Buffer;
+        };
+    };
+    commandResponses: never;
+}
+
+export interface TuyaGenLevelCtrl {
+    attributes: never;
+    commands: {
+        moveToLevelTuya: {
+            level: number;
+            transtime: number;
+        };
+    };
+    commandResponses: never;
 }
 
 export interface ManuSpecificTuya2 {
@@ -408,10 +457,58 @@ const tuyaExposes = {
             .withValueStep(1)
             .withUnit("s")
             .withDescription("Countdown to turn device off after a certain time"),
+    countdown_min: () =>
+        e
+            .numeric("countdown", ea.STATE_SET)
+            .withValueMin(1)
+            .withValueMax(240)
+            .withValueStep(1)
+            .withUnit("min")
+            .withDescription("Turn off the sprinkler after set duration (one time)"),
+    on_with_countdown: () =>
+        e
+            .numeric("on_with_countdown", ea.STATE_SET)
+            .withValueMin(1)
+            .withValueMax(240)
+            .withValueStep(1)
+            .withUnit("min")
+            .withDescription("Turn on the sprinkler and start countdown"),
+    countdown_left: () =>
+        e
+            .numeric("countdown_left", ea.STATE)
+            .withValueMin(0)
+            .withValueMax(240)
+            .withValueStep(1)
+            .withUnit("min")
+            .withDescription("Time left in the countdown"),
+    single_watering_duration: () => e.numeric("single_watering_duration", ea.STATE).withDescription("Duration of last watering").withUnit("s"),
+    flow_switch: () =>
+        e
+            .binary("flow_switch", ea.STATE_SET, "ON", "OFF")
+            .withDescription("Enables water flow measurement, and automatically turn off the sprinkler when flow is 0 for ~30s"),
+    quantitative_watering: () =>
+        e
+            .numeric("quantitative_watering", ea.STATE_SET)
+            .withValueMin(1)
+            .withValueMax(10000)
+            .withValueStep(1)
+            .withUnit("L")
+            .withDescription("Turn on the sprinkler with a set amount of water"),
+    single_watering_amount: () => e.numeric("single_watering_amount", ea.STATE).withUnit("L").withDescription("Quantity of last watering"),
+    surplus_flow: () => e.numeric("surplus_flow", ea.STATE).withUnit("L").withDescription("Remaining amount"),
+    water_total: () => e.numeric("water_total", ea.STATE).withUnit("L").withValueMin(0).withValueStep(0.001).withDescription("Total watering amount"),
+    water_current: () =>
+        e.numeric("water_current", ea.STATE).withUnit("L/min").withValueMin(0).withValueStep(0.001).withDescription("Current water flow"),
+    water_total_reset: () =>
+        e.enum("water_total_reset", ea.STATE_SET, ["reset"]).withDescription("Reset the stored watering amount to 0").withCategory("config"),
+    refresh: () => e.enum("refresh", ea.STATE_SET, ["refresh"]).withDescription("Refresh the device status").withCategory("config"),
+    status_sprinkler: () =>
+        e.enum("status", ea.STATE, ["off", "on_auto", "button_locked", "on_manual_app", "on_manual_button"]).withDescription("Status"),
     switch: () => e.switch().setAccess("state", ea.STATE_SET),
     selfTest: () => e.binary("self_test", ea.STATE_SET, true, false).withDescription("Indicates whether the device is being self-tested"),
     selfTestResult: () =>
         e.enum("self_test_result", ea.STATE, ["checking", "success", "failure", "others"]).withDescription("Result of the self-test"),
+    fault: () => e.binary("fault", ea.STATE, true, false).withDescription("Indicates whether a fault was detected").withCategory("diagnostic"),
     faultAlarm: () => e.binary("fault_alarm", ea.STATE, true, false).withDescription("Indicates whether a fault was detected"),
     silence: () => e.binary("silence", ea.STATE_SET, true, false).withDescription("Silence the alarm"),
     frostProtection: (extraNote = "") =>
@@ -733,6 +830,7 @@ export const valueConverter = {
     switchMode2: valueConverterBasic.lookup({switch: new Enum(0), curtain: new Enum(1)}),
     lightMode: valueConverterBasic.lookup({normal: new Enum(0), on: new Enum(1), off: new Enum(2), flash: new Enum(3)}),
     raw: valueConverterBasic.raw(),
+    fault: {from: (v: Bitmap) => !!v},
     localTemperatureCalibration: {
         from: (value: number) => (value > 4000 ? value - 4096 : value),
         to: (value: number) => (value < 0 ? 4096 + value : value),
@@ -741,6 +839,14 @@ export const valueConverter = {
     localTemperatureCalibration_256: {
         from: (value: number) => (value > 200 ? value - 256 : value),
         to: (value: number) => (value < 0 ? 256 + value : value),
+    },
+    refresh: {
+        to: (v: string) => {
+            return v === "refresh";
+        },
+        from: () => {
+            return "idle";
+        },
     },
     waterConsumption: {
         from: (v: string) => {
@@ -1873,11 +1979,11 @@ const tuyaTz = {
                 value,
                 key === "power_on_behavior" ? {off: 0, on: 1, previous: 2} : {off: 0, on: 1, restore: 2},
             );
-            await entity.write("genOnOff", {moesStartUpOnOff});
+            await entity.write<"genOnOff", TuyaGenOnOff>("genOnOff", {moesStartUpOnOff});
             return {state: {[key]: value}};
         },
         convertGet: async (entity, key, meta) => {
-            await entity.read("genOnOff", ["moesStartUpOnOff"]);
+            await entity.read<"genOnOff", TuyaGenOnOff>("genOnOff", ["moesStartUpOnOff"]);
         },
     } satisfies Tz.Converter,
     power_on_behavior_2: {
@@ -2135,6 +2241,52 @@ const tuyaTz = {
             return {state: {inching_control_set: value}};
         },
     } satisfies Tz.Converter,
+    operation_mode: {
+        key: ["operation_mode"],
+        convertSet: async (entity, key, value, meta) => {
+            // modes:
+            // 0 - 'command' mode. keys send commands. useful for group control
+            // 1 - 'event' mode. keys send events. useful for handling
+            utils.assertString(value, key);
+            const endpoint = meta.device.getEndpoint(1);
+            await endpoint.write<"genOnOff", TuyaGenOnOff>("genOnOff", {tuyaOperationMode: utils.getFromLookup(value, {command: 0, event: 1})});
+            return {state: {operation_mode: value.toLowerCase()}};
+        },
+        convertGet: async (entity, key, meta) => {
+            const endpoint = meta.device.getEndpoint(1);
+            await endpoint.read<"genOnOff", TuyaGenOnOff>("genOnOff", ["tuyaOperationMode"]);
+        },
+    } satisfies Tz.Converter,
+    // biome-ignore lint/style/useNamingConvention: ignored using `--suppress`
+    TS110E_onoff_brightness: {
+        key: ["state", "brightness"],
+        convertSet: async (entity, key, value, meta) => {
+            const {message, state} = meta;
+            if (message.state === "OFF" || (message.state != null && message.brightness == null)) {
+                return await tz.on_off.convertSet(entity, key, value, meta);
+            }
+            if (message.brightness != null) {
+                // set brightness
+                if (state.state === "OFF") {
+                    await entity.command("genOnOff", "on", {}, utils.getOptions(meta.mapped, entity));
+                }
+
+                const brightness = utils.toNumber(message.brightness, "brightness");
+                const level = utils.mapNumberRange(brightness, 0, 254, 0, 1000);
+                await entity.command<"genLevelCtrl", "moveToLevelTuya", TuyaGenLevelCtrl>(
+                    "genLevelCtrl",
+                    "moveToLevelTuya",
+                    {level, transtime: 100},
+                    utils.getOptions(meta.mapped, entity),
+                );
+                return {state: {state: "ON", brightness}};
+            }
+        },
+        convertGet: async (entity, key, meta) => {
+            if (key === "state") await tz.on_off.convertGet(entity, key, meta);
+            if (key === "brightness") await entity.read("genLevelCtrl", [61440]);
+        },
+    } satisfies Tz.Converter,
 };
 
 export {tuyaTz as tz};
@@ -2227,7 +2379,7 @@ const tuyaFz = {
                 return {backlight_mode: backlightLookup[value]};
             }
         },
-    } satisfies Fz.Converter<"genOnOff", undefined, ["attributeReport", "readResponse"]>,
+    } satisfies Fz.Converter<"genOnOff", TuyaGenOnOff, ["attributeReport", "readResponse"]>,
     backlight_mode_off_normal_inverted: {
         cluster: "genOnOff",
         type: ["attributeReport", "readResponse"],
@@ -2236,7 +2388,7 @@ const tuyaFz = {
                 return {backlight_mode: utils.getFromLookup(msg.data.tuyaBacklightMode, {0: "off", 1: "normal", 2: "inverted"})};
             }
         },
-    } satisfies Fz.Converter<"genOnOff", undefined, ["attributeReport", "readResponse"]>,
+    } satisfies Fz.Converter<"genOnOff", TuyaGenOnOff, ["attributeReport", "readResponse"]>,
     backlight_mode_off_on: {
         cluster: "genOnOff",
         type: ["attributeReport", "readResponse"],
@@ -2254,7 +2406,7 @@ const tuyaFz = {
                 return {indicator_mode: utils.getFromLookup(msg.data.tuyaBacklightMode, {0: "off", 1: "off/on", 2: "on/off", 3: "on"})};
             }
         },
-    } satisfies Fz.Converter<"genOnOff", undefined, ["attributeReport", "readResponse"]>,
+    } satisfies Fz.Converter<"genOnOff", TuyaGenOnOff, ["attributeReport", "readResponse"]>,
     indicator_mode_none_relay_pos: {
         cluster: "genOnOff",
         type: ["attributeReport", "readResponse"],
@@ -2263,7 +2415,7 @@ const tuyaFz = {
                 return {indicator_mode: utils.getFromLookup(msg.data.tuyaBacklightMode, {0: "none", 1: "relay", 2: "pos"})};
             }
         },
-    } satisfies Fz.Converter<"genOnOff", undefined, ["attributeReport", "readResponse"]>,
+    } satisfies Fz.Converter<"genOnOff", TuyaGenOnOff, ["attributeReport", "readResponse"]>,
     child_lock: {
         cluster: "genOnOff",
         type: ["attributeReport", "readResponse"],
@@ -2291,7 +2443,7 @@ const tuyaFz = {
         convert: (model, msg, publish, options, meta) => {
             if (utils.hasAlreadyProcessedMessage(msg, model)) return;
             const result: KeyValue = {};
-            if (!model.meta || !model.meta.tuyaDatapoints) throw new Error("No datapoints map defined");
+            if (!model.meta?.tuyaDatapoints) throw new Error("No datapoints map defined");
             const datapoints = model.meta.tuyaDatapoints;
             for (const dpValue of msg.data.dpValues) {
                 const dpId = dpValue.dp;
@@ -2326,7 +2478,7 @@ const tuyaFz = {
                 msg.device.endpoints.length === 1 || ["TS0041A", "TS0041"].includes(msg.device.modelID) ? "" : `${buttonMapping[msg.endpoint.ID]}_`;
             return {action: `${button}${clickMapping[msg.data.value]}`};
         },
-    } satisfies Fz.Converter<"genOnOff", undefined, "commandTuyaAction">,
+    } satisfies Fz.Converter<"genOnOff", TuyaGenOnOff, "commandTuyaAction">,
     on_off_countdown: {
         // While a countdown is in progress, the device will report onTime at all multiples of 60.
         // More reportings can be configured for 'onTime` but they will happen independently of
@@ -2406,6 +2558,47 @@ const tuyaFz = {
             return result;
         },
     } satisfies Fz.Converter<"haElectricalMeasurement", undefined, ["attributeReport", "readResponse"]>,
+    operation_mode: {
+        cluster: "genOnOff",
+        type: ["attributeReport", "readResponse"],
+        convert: (model, msg, publish, options, meta) => {
+            if (msg.data.tuyaOperationMode !== undefined) {
+                const value = msg.data.tuyaOperationMode;
+                const lookup: KeyValueAny = {0: "command", 1: "event"};
+                return {operation_mode: lookup[value]};
+            }
+        },
+    } satisfies Fz.Converter<"genOnOff", TuyaGenOnOff, ["attributeReport", "readResponse"]>,
+    switch_scene: {
+        cluster: "genOnOff",
+        type: "commandTuyaAction",
+        convert: (model, msg, publish, options, meta) => {
+            if (utils.hasAlreadyProcessedMessage(msg, model)) return;
+            // Since it is a non standard ZCL command, no default response is send from zigbee-herdsman
+            // Send the defaultResponse here, otherwise the second button click delays.
+            // https://github.com/Koenkk/zigbee2mqtt/issues/8149
+            return {action: "switch_scene", action_scene: msg.data.value};
+        },
+    } satisfies Fz.Converter<"genOnOff", TuyaGenOnOff, "commandTuyaAction">,
+    multi_action: {
+        cluster: "genOnOff",
+        type: ["commandTuyaAction", "commandTuyaAction2"],
+        convert: (model, msg, publish, options, meta) => {
+            if (utils.hasAlreadyProcessedMessage(msg, model)) return;
+
+            // biome-ignore lint/suspicious/noImplicitAnyLet: ignored using `--suppress`
+            let action;
+            if (msg.type === "commandTuyaAction") {
+                const lookup: KeyValueAny = {0: "single", 1: "double", 2: "hold"};
+                action = lookup[msg.data.value];
+            } else if (msg.type === "commandTuyaAction2") {
+                const lookup: KeyValueAny = {0: "rotate_right", 1: "rotate_left"};
+                action = lookup[msg.data.value];
+            }
+
+            return {action};
+        },
+    } satisfies Fz.Converter<"genOnOff", TuyaGenOnOff, ["commandTuyaAction", "commandTuyaAction2"]>,
 };
 
 export {tuyaFz as fz};
@@ -2770,10 +2963,30 @@ const tuyaModernExtend = {
             ];
         }
 
+        const tuyaGenBasic = tuyaClusters.addTuyaGenBasicCluster();
+        const tuyaGenGroups = tuyaClusters.addTuyaGenGroupsCluster();
+        const tuyaGenOnOff = tuyaClusters.addTuyaGenOnOffCluster();
+        const tuyaGenLevelCtrl = tuyaClusters.addTuyaGenLevelCtrlCluster();
         const customCluster2 = tuyaClusters.addManuSpecificTuya2Cluster();
         const customCluster3 = tuyaClusters.addManuSpecificTuya3Cluster();
-        result.onEvent = [...(customCluster2.onEvent ?? []), ...(customCluster3.onEvent ?? []), ...(result.onEvent ?? [])];
-        result.configure = [...(customCluster2.configure ?? []), ...(customCluster3.configure ?? []), ...(result.configure ?? [])];
+        result.onEvent = [
+            ...(tuyaGenBasic.onEvent ?? []),
+            ...(tuyaGenGroups.onEvent ?? []),
+            ...(tuyaGenOnOff.onEvent ?? []),
+            ...(tuyaGenLevelCtrl.onEvent ?? []),
+            ...(customCluster2.onEvent ?? []),
+            ...(customCluster3.onEvent ?? []),
+            ...(result.onEvent ?? []),
+        ];
+        result.configure = [
+            ...(tuyaGenBasic.configure ?? []),
+            ...(tuyaGenGroups.configure ?? []),
+            ...(tuyaGenOnOff.configure ?? []),
+            ...(tuyaGenLevelCtrl.configure ?? []),
+            ...(customCluster2.configure ?? []),
+            ...(customCluster3.configure ?? []),
+            ...(result.configure ?? []),
+        ];
 
         if (dp) {
             result.fromZigbee.push(tuyaFz.datapoints);
@@ -3502,6 +3715,71 @@ const tuyaModernExtend = {
 export {tuyaModernExtend as modernExtend};
 
 const tuyaClusters = {
+    addTuyaGenBasicCluster: () =>
+        modernExtend.deviceAddCustomCluster("genBasic", {
+            name: "genBasic",
+            ID: Zcl.Clusters.genBasic.ID,
+            attributes: {},
+            commands: {
+                tuyaSetup: {name: "tuyaSetup", ID: 0xf0, parameters: []},
+            },
+            commandsResponse: {},
+        }),
+    addTuyaGenGroupsCluster: () =>
+        modernExtend.deviceAddCustomCluster("genGroups", {
+            name: "genGroups",
+            ID: Zcl.Clusters.genGroups.ID,
+            attributes: {},
+            commands: {
+                miboxerSetZones: {name: "miboxerSetZones", ID: 0xf0, parameters: [{name: "zones", type: Zcl.BuffaloZclDataType.LIST_MIBOXER_ZONES}]},
+            },
+            commandsResponse: {},
+        }),
+    addTuyaGenOnOffCluster: () =>
+        modernExtend.deviceAddCustomCluster("genOnOff", {
+            name: "genOnOff",
+            ID: Zcl.Clusters.genOnOff.ID,
+            attributes: {
+                tuyaBacklightSwitch: {name: "tuyaBacklightSwitch", ID: 0x5000, type: Zcl.DataType.ENUM8, write: true, max: 0xff},
+                tuyaBacklightMode: {name: "tuyaBacklightMode", ID: 0x8001, type: Zcl.DataType.ENUM8, write: true, max: 0xff},
+                moesStartUpOnOff: {name: "moesStartUpOnOff", ID: 0x8002, type: Zcl.DataType.ENUM8, write: true, max: 0xff},
+                tuyaOperationMode: {name: "tuyaOperationMode", ID: 0x8004, type: Zcl.DataType.ENUM8, write: true, max: 0xff},
+            },
+            commands: {
+                tuyaCountdown: {
+                    name: "tuyaCountdown",
+                    ID: 0xf0,
+                    parameters: [{name: "data", type: Zcl.BuffaloZclDataType.BUFFER}],
+                },
+                tuyaAction2: {name: "tuyaAction2", ID: 0xfc, parameters: [{name: "value", type: Zcl.DataType.UINT8, max: 0xff}]},
+                tuyaAction: {
+                    name: "tuyaAction",
+                    ID: 0xfd,
+                    parameters: [
+                        {name: "value", type: Zcl.DataType.UINT8, max: 0xff},
+                        {name: "data", type: Zcl.BuffaloZclDataType.BUFFER},
+                    ],
+                },
+            },
+            commandsResponse: {},
+        }),
+    addTuyaGenLevelCtrlCluster: () =>
+        modernExtend.deviceAddCustomCluster("genLevelCtrl", {
+            name: "genLevelCtrl",
+            ID: Zcl.Clusters.genLevelCtrl.ID,
+            attributes: {},
+            commands: {
+                moveToLevelTuya: {
+                    name: "moveToLevelTuya",
+                    ID: 0xf0,
+                    parameters: [
+                        {name: "level", type: Zcl.DataType.UINT16, max: 0xffff},
+                        {name: "transtime", type: Zcl.DataType.UINT16, max: 0xffff},
+                    ],
+                },
+            },
+            commandsResponse: {},
+        }),
     addManuSpecificTuya2Cluster: (): ModernExtend =>
         modernExtend.deviceAddCustomCluster("manuSpecificTuya2", {
             name: "manuSpecificTuya2",
