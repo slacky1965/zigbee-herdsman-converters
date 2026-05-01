@@ -380,59 +380,6 @@ function elpcCurrentSummDelivered(args: ElpcCurrentSummDeliveredArgs = {}): Mode
     return {exposes, fromZigbee, toZigbee, configure, isModernExtend: true};
 }
 
-interface ElpcPowerSourceArgs {
-    devicePower?: string[];
-    reporting?: boolean;
-    reportingConfig?: m.ReportingConfigWithoutAttribute;
-    endpointNames?: string[];
-}
-
-function elpcPowerSource(args: ElpcPowerSourceArgs = {}): ModernExtend {
-    const {
-        devicePower = ["unknown", "mains (single phase)", "mains (3 phase)", "battery"],
-        reporting = true,
-        reportingConfig = {min: 0, max: 65000, change: 0},
-        endpointNames = undefined,
-    } = args;
-
-    const powers: string[] = devicePower;
-
-    const exposes: Expose[] = [e.enum("power", ea.STATE, powers)];
-
-    const powerPayloadLookup: {[key: number]: string} = {
-        0: "Unknown",
-        1: "Mains (single phase)",
-        2: "Mains (3 phase)",
-        3: "Battery",
-    };
-
-    const fromZigbee = [
-        {
-            cluster: "genBasic",
-            type: ["attributeReport", "readResponse"],
-            convert: (model, msg, publish, options, meta) => {
-                if (msg.data.powerSource !== undefined) {
-                    const value = msg.data.powerSource;
-                    //logger.info(`value power data: ${value}`, NS);
-                    const payload = {power: powerPayloadLookup[value]};
-                    return payload;
-                }
-            },
-        } satisfies Fz.Converter<"genBasic", undefined, ["attributeReport", "readResponse"]>,
-    ];
-
-    const result: ModernExtend = {exposes, fromZigbee, isModernExtend: true};
-
-    if (reporting) {
-        result.configure = [
-            m.setupConfigureForBinding("genBasic", "input"),
-            m.setupConfigureForReporting("genBasic", "powerSource", {config: reportingConfig, access: ea.GET, endpointNames}),
-        ];
-    }
-
-    return result;
-}
-
 export const definitions: DefinitionWithExtend[] = [
     {
         zigbeeModel: ["Ensystec.ELPC"],
@@ -574,7 +521,15 @@ export const definitions: DefinitionWithExtend[] = [
                 description: "Low battery",
                 access: "STATE_GET",
             }),
-            elpcPowerSource(),
+            m.enumLookup({
+                name: "power",
+                lookup: {unknown: 0, "mains (single phase)": 1, "mains (3 phase)": 2, battery: 3},
+                cluster: "genBasic",
+                attribute: "powerSource",
+                access: "STATE_GET",
+                reporting: {min: 0, max: 65000, change: 0},
+                description: "Power indicator",
+            }),
             elpcResetAlarm(),
             elpcForceOpen({endpointName: "6"}),
             elpcCurrentSummDelivered({endpointNames: ["7", "8", "9", "10", "11", "12", "13", "14", "15", "16"]}),
