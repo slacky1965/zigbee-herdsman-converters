@@ -745,7 +745,7 @@ export function determineEndpoint(entity: Zh.Endpoint | Zh.Group, meta: Tz.Meta,
 
 export function getEndpointsWithCluster(device: Zh.Device, cluster: string | number, type: "input" | "output") {
     if (!device.endpoints) {
-        throw new Error(`${device.ieeeAddr} ${device.endpoints}`);
+        throw new Error(`Device ${device.ieeeAddr} has no endpoints`);
     }
     const endpoints =
         type === "input"
