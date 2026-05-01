@@ -7,11 +7,10 @@ import * as utils from "../lib/utils";
 import {getEndpointsWithCluster, postfixWithEndpointName} from "../lib/utils";
 
 //import {logger} from "../lib/logger";
+//const NS = "zhc:ensystec";
 
 const e = exposes.presets;
 const ea = exposes.access;
-
-//const NS = "zhc:ensystec";
 
 interface EnsystecLeakSensor {
     attributes: {
@@ -39,7 +38,10 @@ function elpcResetAlarm(): ModernExtend {
         {
             key: ["alarm_reset"],
             convertSet: async (entity, key, value, meta) => {
+                utils.assertString(value, key);
+                utils.validateValue(value, ["reset"]);
                 await entity.command("EnsystecLeakProtect", 0x00, {}, utils.getOptions(meta.mapped, entity));
+                return {state: {[key]: value}};
             },
         },
     ];
@@ -53,9 +55,7 @@ interface ElpcForceOpenArgs {
 
 function elpcForceOpen(args: ElpcForceOpenArgs = {}): ModernExtend {
     const {endpointName = undefined} = args;
-
     const cluster = "genOnOff";
-
     const name = "force_open";
 
     let expose = e.enum(name, ea.SET, ["Force open"]).withDescription("Force open electric valves");
@@ -63,7 +63,7 @@ function elpcForceOpen(args: ElpcForceOpenArgs = {}): ModernExtend {
 
     const toZigbee: Tz.Converter[] = [
         {
-            key: [endpointName ? `${name}_${endpointName}` : name],
+            key: [name],
             convertSet: async (entity, key, value, meta) => {
                 if (endpointName) {
                     const ep = utils.toNumber(endpointName);
@@ -244,7 +244,7 @@ function elpcCurrentSummDelivered(args: ElpcCurrentSummDeliveredArgs = {}): Mode
                 utils.assertEndpoint(entity);
                 globalStore.putValue(utils.enforceEndpoint(entity, key, meta), "Divisor", divisor);
                 await entity.read("seMetering", ["currentSummDelivered"]);
-                return {readAfterWriteTime: 250, state: {divisor: value}};
+                return {readAfterWriteTime: 250, state: {[key]: value}};
             },
         },
         {
@@ -270,7 +270,7 @@ function elpcCurrentSummDelivered(args: ElpcCurrentSummDeliveredArgs = {}): Mode
                 utils.assertEndpoint(entity);
                 globalStore.putValue(utils.enforceEndpoint(entity, key, meta), "Multiplier", multiplier);
                 await entity.read("seMetering", ["currentSummDelivered"]);
-                return {readAfterWriteTime: 250, state: {multiplier: value}};
+                return {readAfterWriteTime: 250, state: {[key]: value}};
             },
         },
         {
@@ -350,13 +350,13 @@ function elpcCurrentSummDelivered(args: ElpcCurrentSummDeliveredArgs = {}): Mode
             convert: (model, msg, publish, options, meta) => {
                 const result: KeyValueAny = {};
                 if (msg.data.currentSummDelivered !== undefined) {
-                    let Divisor = globalStore.getValue(msg.endpoint, "Divisor");
-                    let Multiplier = globalStore.getValue(msg.endpoint, "Multiplier");
-                    if (Divisor === undefined) {
-                        Divisor = 1;
+                    let divisor = globalStore.getValue(msg.endpoint, "Divisor");
+                    let multiplier = globalStore.getValue(msg.endpoint, "Multiplier");
+                    if (divisor === undefined) {
+                        divisor = 1;
                     }
-                    if (Multiplier === undefined) {
-                        Multiplier = 1;
+                    if (multiplier === undefined) {
+                        multiplier = 1;
                     }
                     if (endpoints) {
                         const ep = utils.getEndpointName(msg, model, meta);
@@ -364,12 +364,12 @@ function elpcCurrentSummDelivered(args: ElpcCurrentSummDeliveredArgs = {}): Mode
                             if (i === max_endpoints) break;
                             if (ep === endpoints[i]) {
                                 result[postfixWithEndpointName(name_energy[i], msg, model, meta)] =
-                                    (msg.data.currentSummDelivered * Multiplier) / Divisor;
+                                    (msg.data.currentSummDelivered * multiplier) / divisor;
                                 break;
                             }
                         }
                     } else {
-                        result[name_energy[0]] = (msg.data.currentSummDelivered * Multiplier) / Divisor;
+                        result[name_energy[0]] = (msg.data.currentSummDelivered * multiplier) / divisor;
                     }
                 }
                 return result;
@@ -392,6 +392,9 @@ export const definitions: DefinitionWithExtend[] = [
                     "1": 1,
                     "2": 2,
                     "3": 3,
+                    "4": 4,
+                    "5": 5,
+                    "6": 6,
                     "7": 7,
                     "8": 8,
                     "9": 9,
@@ -533,7 +536,7 @@ export const definitions: DefinitionWithExtend[] = [
             elpcResetAlarm(),
             elpcForceOpen({endpointName: "6"}),
             elpcCurrentSummDelivered({endpointNames: ["7", "8", "9", "10", "11", "12", "13", "14", "15", "16"]}),
-            m.onOff({powerOnBehavior: false, endpointNames: ["2"], description: "Open/сlose control of electric valve(-s) on OUT1"}),
+            m.onOff({powerOnBehavior: false, endpointNames: ["2"], description: "Open/close control of electric valve(-s) on OUT1"}),
             m.numeric<"genOnOff", EnsystecDefenderOpenClose>({
                 name: "position_percent",
                 endpointNames: ["2"],
@@ -891,7 +894,7 @@ export const definitions: DefinitionWithExtend[] = [
                 valueOn: ["online", 1],
                 valueOff: ["offline", 0],
                 access: "STATE_GET",
-                description: "Сonnection control on wireless channel 1",
+                description: "Connection control on wireless channel 1",
             }),
             m.binary<"EnsystecLeakProtect", EnsystecLeakSensor>({
                 name: "channel_2_connection_control",
@@ -901,7 +904,7 @@ export const definitions: DefinitionWithExtend[] = [
                 valueOn: ["online", 1],
                 valueOff: ["offline", 0],
                 access: "STATE_GET",
-                description: "Сonnection control on wireless channel 2",
+                description: "Connection control on wireless channel 2",
             }),
             m.binary<"EnsystecLeakProtect", EnsystecLeakSensor>({
                 name: "channel_3_connection_control",
@@ -911,7 +914,7 @@ export const definitions: DefinitionWithExtend[] = [
                 valueOn: ["online", 1],
                 valueOff: ["offline", 0],
                 access: "STATE_GET",
-                description: "Сonnection control on wireless channel 3",
+                description: "Connection control on wireless channel 3",
             }),
             m.binary<"EnsystecLeakProtect", EnsystecLeakSensor>({
                 name: "channel_4_connection_control",
@@ -921,7 +924,7 @@ export const definitions: DefinitionWithExtend[] = [
                 valueOn: ["online", 1],
                 valueOff: ["offline", 0],
                 access: "STATE_GET",
-                description: "Сonnection control on wireless channel 4",
+                description: "Connection control on wireless channel 4",
             }),
             m.binary<"EnsystecLeakProtect", EnsystecLeakSensor>({
                 name: "channel_5_connection_control",
@@ -931,7 +934,7 @@ export const definitions: DefinitionWithExtend[] = [
                 valueOn: ["online", 1],
                 valueOff: ["offline", 0],
                 access: "STATE_GET",
-                description: "Сonnection control on wireless channel 5",
+                description: "Connection control on wireless channel 5",
             }),
             m.binary<"EnsystecLeakProtect", EnsystecLeakSensor>({
                 name: "channel_6_connection_control",
@@ -941,7 +944,7 @@ export const definitions: DefinitionWithExtend[] = [
                 valueOn: ["online", 1],
                 valueOff: ["offline", 0],
                 access: "STATE_GET",
-                description: "Сonnection control on wireless channel 6",
+                description: "Connection control on wireless channel 6",
             }),
             m.binary<"EnsystecLeakProtect", EnsystecLeakSensor>({
                 name: "channel_7_connection_control",
@@ -951,7 +954,7 @@ export const definitions: DefinitionWithExtend[] = [
                 valueOn: ["online", 1],
                 valueOff: ["offline", 0],
                 access: "STATE_GET",
-                description: "Сonnection control on wireless channel 7",
+                description: "Connection control on wireless channel 7",
             }),
             m.binary<"EnsystecLeakProtect", EnsystecLeakSensor>({
                 name: "channel_8_connection_control",
@@ -961,7 +964,7 @@ export const definitions: DefinitionWithExtend[] = [
                 valueOn: ["online", 1],
                 valueOff: ["offline", 0],
                 access: "STATE_GET",
-                description: "Сonnection control on wireless channel 8",
+                description: "Connection control on wireless channel 8",
             }),
             m.binary<"EnsystecLeakProtect", EnsystecLeakSensor>({
                 name: "channel_9_connection_control",
@@ -971,7 +974,7 @@ export const definitions: DefinitionWithExtend[] = [
                 valueOn: ["online", 1],
                 valueOff: ["offline", 0],
                 access: "STATE_GET",
-                description: "Сonnection control on wireless channel 9",
+                description: "Connection control on wireless channel 9",
             }),
             m.binary<"EnsystecLeakProtect", EnsystecLeakSensor>({
                 name: "channel_10_connection_control",
@@ -981,7 +984,7 @@ export const definitions: DefinitionWithExtend[] = [
                 valueOn: ["online", 1],
                 valueOff: ["offline", 0],
                 access: "STATE_GET",
-                description: "Сonnection control on wireless channel 10",
+                description: "Connection control on wireless channel 10",
             }),
             m.binary<"EnsystecLeakProtect", EnsystecLeakSensor>({
                 name: "channel_1_leak_detect",
