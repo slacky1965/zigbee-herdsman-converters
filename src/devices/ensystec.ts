@@ -556,7 +556,7 @@ export const definitions: DefinitionWithExtend[] = [
                 valueOff: ["Not connected", 0],
                 description: "Electric valve(-s) connected to OUT1",
             }),
-            m.onOff({powerOnBehavior: false, endpointNames: ["3"], description: "Open/сlose control of electric valves on OUT2"}),
+            m.onOff({powerOnBehavior: false, endpointNames: ["3"], description: "Open/close control of electric valves on OUT2"}),
             m.numeric<"genOnOff", EnsystecDefenderOpenClose>({
                 name: "position_percent",
                 access: "STATE_GET",
