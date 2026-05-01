@@ -385,7 +385,7 @@ export const definitions: DefinitionWithExtend[] = [
         zigbeeModel: ["Ensystec.ELPC"],
         model: "Ensystec-Leak-Protect-Zigbee",
         vendor: "Ensystec",
-        description: "Ensystec Leak Protect controller with Zigbee module",
+        description: "Leak protect controller with Zigbee module",
         extend: [
             m.deviceEndpoints({
                 endpoints: {
