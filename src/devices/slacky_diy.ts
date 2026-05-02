@@ -2600,7 +2600,7 @@ export const definitions: DefinitionWithExtend[] = [
             e
                 .climate()
                 .withLocalTemperature()
-                .withSetpoint("occupied_heating_setpoint", 1, 50, 1)
+                .withSetpoint("occupied_heating_setpoint", 1, 50, 0.5)
                 .withLocalTemperatureCalibration(-9, 9, 1)
                 .withSystemMode(["off", "heat"])
                 .withRunningState(["idle", "heat"], ea.STATE)
