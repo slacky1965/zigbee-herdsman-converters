@@ -1,4 +1,4 @@
-﻿import {getTimeClusterAttributes, Zcl} from "zigbee-herdsman";
+import {getTimeClusterAttributes, Zcl} from "zigbee-herdsman";
 import * as fz from "../converters/fromZigbee";
 import * as tz from "../converters/toZigbee";
 import * as constants from "../lib/constants";
@@ -198,9 +198,10 @@ interface SonoffTrvzbt {
         weeklyScheduleActiveNum: number;
         hvacMessageNotification: number[];
         heatPercentageHour: number;
+        motorTravelCalibration: number;
+        motorTravelCalibrationStatus: number;
     };
     commands: {
-        scheduleName: {data: number[]};
         readTemperatureControlHistory: {data: number[]};
         bluetoothPairing: {data: number[]};
         scheduleGroup: {data: number[]};
@@ -271,6 +272,20 @@ interface SonoffSwvzn {
     };
 }
 
+interface SonoffSnzb02ul {
+    attributes: {
+        comfortTemperatureMax: number;
+        comfortTemperatureMin: number;
+        temperatureUnits: number;
+        comfortHumidityMin: number;
+        comfortHumidityMax: number;
+        temperatureCalibration: number;
+        humidityCalibration: number;
+    };
+    commands: never;
+    commandResponses: never;
+}
+
 // SWV-ZN/ZF history response type
 type SonoffSwvHistoryRecord = {
     channel?: string;
@@ -339,6 +354,9 @@ const sonoffTrvzbtScheduleDays = ["sunday", "monday", "tuesday", "wednesday", "t
 type SonoffTrvzbtScheduleDayName = (typeof sonoffTrvzbtScheduleDays)[number];
 type SonoffTrvzbtScheduleTransition = {transitionTime: number; heatSetpoint: number};
 const sonoffTrvzbtTargetTemperatureRange = {min: 5, max: 30, step: 0.5};
+const sonoffTrvzbtScheduleGroupLookup = {"1": 0, "2": 1, "3": 2} as const;
+type SonoffTrvzbtSchedulePublicGroup = keyof typeof sonoffTrvzbtScheduleGroupLookup;
+const sonoffTrvzbtScheduleGroupInternalRange = {min: 0, max: 2};
 const sonoffTrvzbtFrostProtectionTemperatureRange = {min: 5, max: 15, step: 0.5};
 const sonoffTrvzbtLocalTemperatureCalibrationRange = {min: -10, max: 10, step: 0.2};
 const sonoffTrvzbtTemporaryModeLookup = {boost: 0, timer: 1} as const;
@@ -389,15 +407,49 @@ type SonoffTrvzbtTemperatureControlHistoryState = {
 };
 
 const sonoffTrvzbtScheduleActiveNumCache = new Map<string, number>();
+const sonoffTrvzbtScheduleSelectedNumCache = new Map<string, number>();
 const sonoffTrvzbtTemperatureControlHistoryReqCache: Record<string, Record<number, SonoffTrvzbtTemperatureControlHistoryRequest>> = {};
 const sonoffTrvzbtTemperatureControlHistoryRespCache: Record<string, SonoffTrvzbtTemperatureControlHistoryState> = {};
 
-const getValidSonoffTrvzbtScheduleActiveNum = (value: unknown): number | undefined => {
-    const activeNum = Number(value);
+const getValidSonoffTrvzbtScheduleGroupNum = (value: unknown): number | undefined => {
+    const scheduleGroup = Number(value);
 
-    if (!Number.isInteger(activeNum) || activeNum < 0 || activeNum > 0xff) return;
+    if (
+        !Number.isInteger(scheduleGroup) ||
+        scheduleGroup < sonoffTrvzbtScheduleGroupInternalRange.min ||
+        scheduleGroup > sonoffTrvzbtScheduleGroupInternalRange.max
+    ) {
+        return;
+    }
 
-    return activeNum;
+    return scheduleGroup;
+};
+
+const getValidSonoffTrvzbtSchedulePublicGroup = (value: unknown): SonoffTrvzbtSchedulePublicGroup | undefined => {
+    const scheduleGroup = String(value);
+
+    if (!(scheduleGroup in sonoffTrvzbtScheduleGroupLookup)) {
+        return;
+    }
+
+    return scheduleGroup as SonoffTrvzbtSchedulePublicGroup;
+};
+
+const assertSonoffTrvzbtSchedulePublicGroup = (value: unknown, key: string): SonoffTrvzbtSchedulePublicGroup => {
+    const scheduleGroup = getValidSonoffTrvzbtSchedulePublicGroup(value);
+    if (scheduleGroup === undefined) {
+        throw new Error(`Invalid ${key}: expected one of ${Object.keys(sonoffTrvzbtScheduleGroupLookup).join(", ")}, got ${value}`);
+    }
+
+    return scheduleGroup;
+};
+
+const toSonoffTrvzbtSchedulePublicGroup = (scheduleGroup: number): SonoffTrvzbtSchedulePublicGroup => {
+    return String(scheduleGroup + 1) as SonoffTrvzbtSchedulePublicGroup;
+};
+
+const toSonoffTrvzbtScheduleInternalGroup = (scheduleGroup: SonoffTrvzbtSchedulePublicGroup): number => {
+    return sonoffTrvzbtScheduleGroupLookup[scheduleGroup];
 };
 
 const getSonoffTrvzbtDeviceCacheKey = (endpoint?: Zh.Endpoint | null, device?: Zh.Device | null): string | undefined => {
@@ -452,11 +504,13 @@ const buildSonoffTrvzbtTemperatureControlHistoryData = (
 
     for (const value of values) {
         const intervalEndSec = getSonoffTrvzbtTemperatureControlHistoryIntervalEnd(type, intervalStartSec, request.displayOffsetSeconds);
-        records.push({
-            value,
-            startTime: formatUtcSecondsToIsoWithOffset(intervalStartSec, request.displayOffsetSeconds),
-            endTime: formatUtcSecondsToIsoWithOffset(intervalEndSec, request.displayOffsetSeconds),
-        });
+        if (!Number.isNaN(value)) {
+            records.push({
+                value,
+                startTime: formatUtcSecondsToIsoWithOffset(intervalStartSec, request.displayOffsetSeconds),
+                endTime: formatUtcSecondsToIsoWithOffset(intervalEndSec, request.displayOffsetSeconds),
+            });
+        }
         intervalStartSec = intervalEndSec;
     }
 
@@ -489,6 +543,9 @@ const buildSonoffTrvzbtTemperatureControlHistoryResult = (
         temperature_data: formatSonoffTrvzbtTemperatureControlHistoryOutputData(
             buildSonoffTrvzbtTemperatureControlHistoryData(request.type, valuesByDataType[0x00] ?? [], request),
         ),
+        heat_percentage_data: formatSonoffTrvzbtTemperatureControlHistoryOutputData(
+            buildSonoffTrvzbtTemperatureControlHistoryData(request.type, valuesByDataType[0x01] ?? [], request),
+        ),
         target_temperature_data: formatSonoffTrvzbtTemperatureControlHistoryOutputData(
             buildSonoffTrvzbtTemperatureControlHistoryData(request.type, valuesByDataType[0x02] ?? [], request),
         ),
@@ -511,28 +568,35 @@ const formatSonoffTrvzbtFaultCode = (value: unknown): string => {
     }
 
     const rawValue = faultCode >>> 0;
+    // Strip protocol header: bits 0-15 are the 2-byte fault data (V),
+    // bits 16-23 are the length byte (L), bits 24-31 are the marker 0x0A.
+    const faultBits = rawValue & 0xffff;
     const descriptions: string[] = Object.entries(sonoffTrvzbtFaultCodeLookup)
-        .filter(([bit]) => (rawValue & (1 << Number(bit))) !== 0)
+        .filter(([bit]) => (faultBits & (1 << Number(bit))) !== 0)
         .map(([, description]) => description);
 
     logger.info(
-        `TRV-ZBT formatSonoffTrvzbtFaultCode: rawValue=${rawValue} (0x${rawValue.toString(16).padStart(8, "0")}), matchedBits=${JSON.stringify(descriptions)}`,
+        `TRV-ZBT formatSonoffTrvzbtFaultCode: rawValue=${rawValue} (0x${rawValue.toString(16).padStart(8, "0")}), faultBits=${faultBits} (0x${faultBits.toString(16).padStart(4, "0")}), matchedBits=${JSON.stringify(descriptions)}`,
         NS,
     );
 
     if (descriptions.length === 0) {
-        const result = rawValue === 0 ? "none" : "unknown";
+        const result = faultBits === 0 ? "none" : "unknown";
         logger.info(`TRV-ZBT formatSonoffTrvzbtFaultCode result: "${result}" (no known bits matched)`, NS);
         return result;
     }
 
-    if ((rawValue & ~sonoffTrvzbtKnownFaultCodeMask) !== 0) {
+    if ((faultBits & ~sonoffTrvzbtKnownFaultCodeMask) !== 0) {
         descriptions.push("unknown");
     }
 
     const result = descriptions.join(", ");
     logger.info(`TRV-ZBT formatSonoffTrvzbtFaultCode result: "${result}"`, NS);
     return result;
+};
+
+const formatMotorTravelCalibrationStatus = (value: unknown): string => {
+    return Number(value) === 0x00 ? "success" : "fail";
 };
 
 const cacheSonoffTrvzbtScheduleActiveNum = (activeNum: number, endpoint?: Zh.Endpoint | null, device?: Zh.Device | null): void => {
@@ -542,22 +606,43 @@ const cacheSonoffTrvzbtScheduleActiveNum = (activeNum: number, endpoint?: Zh.End
     }
 };
 
+const cacheSonoffTrvzbtScheduleSelectedNum = (selectedNum: number, endpoint?: Zh.Endpoint | null, device?: Zh.Device | null): void => {
+    const cacheKey = getSonoffTrvzbtDeviceCacheKey(endpoint, device);
+    if (cacheKey) {
+        sonoffTrvzbtScheduleSelectedNumCache.set(cacheKey, selectedNum);
+    }
+};
+
 const getCachedSonoffTrvzbtScheduleActiveNum = (endpoint?: Zh.Endpoint | null, device?: Zh.Device | null): number | undefined => {
     const cacheKey = getSonoffTrvzbtDeviceCacheKey(endpoint, device);
 
     return cacheKey ? sonoffTrvzbtScheduleActiveNumCache.get(cacheKey) : undefined;
 };
 
+const getCachedSonoffTrvzbtScheduleSelectedNum = (endpoint?: Zh.Endpoint | null, device?: Zh.Device | null): number | undefined => {
+    const cacheKey = getSonoffTrvzbtDeviceCacheKey(endpoint, device);
+
+    return cacheKey ? sonoffTrvzbtScheduleSelectedNumCache.get(cacheKey) : undefined;
+};
+
+const getSonoffTrvzbtScheduleSelectedNum = (endpoint?: Zh.Endpoint | null, device?: Zh.Device | null): number => {
+    return getCachedSonoffTrvzbtScheduleSelectedNum(endpoint, device) ?? getCachedSonoffTrvzbtScheduleActiveNum(endpoint, device) ?? 0;
+};
+
+const getSonoffTrvzbtEndpoint = (entity: Zh.Endpoint | Zh.Group): Zh.Endpoint | undefined => {
+    return "read" in entity && typeof entity.read === "function" ? (entity as Zh.Endpoint) : undefined;
+};
+
 const readSonoffTrvzbtScheduleActiveNum = async (entity: Zh.Endpoint | Zh.Group, device: Zh.Device | undefined, reason: string): Promise<number> => {
-    const endpoint = "read" in entity && typeof entity.read === "function" ? (entity as Zh.Endpoint) : undefined;
+    const endpoint = getSonoffTrvzbtEndpoint(entity);
 
     if (endpoint) {
         try {
             const readResult = await endpoint.read<"customSonoffTrvzbt", SonoffTrvzbt>("customSonoffTrvzbt", ["weeklyScheduleActiveNum"]);
-            const activeNum = getValidSonoffTrvzbtScheduleActiveNum(readResult.weeklyScheduleActiveNum);
+            const activeNum = getValidSonoffTrvzbtScheduleGroupNum(readResult.weeklyScheduleActiveNum);
             if (activeNum !== undefined) {
                 cacheSonoffTrvzbtScheduleActiveNum(activeNum, endpoint, device);
-                logger.info(`TRV-ZBT ${reason}: active schedule group=${activeNum}`, NS);
+                logger.info(`TRV-ZBT ${reason}: active schedule group=${toSonoffTrvzbtSchedulePublicGroup(activeNum)}`, NS);
                 return activeNum;
             }
 
@@ -570,26 +655,43 @@ const readSonoffTrvzbtScheduleActiveNum = async (entity: Zh.Endpoint | Zh.Group,
     return getCachedSonoffTrvzbtScheduleActiveNum(endpoint, device) ?? 0;
 };
 
+const getSonoffTrvzbtScheduleNumFromMessage = (
+    entity: Zh.Endpoint | Zh.Group,
+    device: Zh.Device | undefined,
+    message: Record<string, unknown> | null,
+): number => {
+    const endpoint = getSonoffTrvzbtEndpoint(entity);
+    const selectedGroup = message?.schedule_group_to_edit;
+    if (selectedGroup !== undefined) {
+        const publicGroup = assertSonoffTrvzbtSchedulePublicGroup(selectedGroup, "schedule_group_to_edit");
+        const selectedNum = toSonoffTrvzbtScheduleInternalGroup(publicGroup);
+        cacheSonoffTrvzbtScheduleSelectedNum(selectedNum, endpoint, device);
+        return selectedNum;
+    }
+
+    return getSonoffTrvzbtScheduleSelectedNum(endpoint, device);
+};
+
 const formatSonoffTrvzbtPayload = (payload: Iterable<number>): string => {
     return `[${Array.from(payload)
         .map((byte) => `0x${byte.toString(16).padStart(2, "0")}`)
         .join(", ")}]`;
 };
 
-const shouldMirrorSonoffTrvzbtActiveSchedule = (
-    activeNum: number,
+const shouldMirrorSonoffTrvzbtSelectedSchedule = (
+    scheduleNum: number,
     meta: Fz.Meta,
     endpoint?: Zh.Endpoint | null,
     device?: Zh.Device | null,
 ): boolean => {
-    return activeNum === (getCachedSonoffTrvzbtScheduleActiveNum(endpoint, device ?? meta.device) ?? 0);
+    return scheduleNum === getSonoffTrvzbtScheduleSelectedNum(endpoint, device ?? meta.device);
 };
 
 const parseSonoffTrvzbtScheduleString = (scheduleValue: string, dayName: string) => {
     const transitionRegex = /^(0[0-9]|1[0-9]|2[0-3]):([0-5][0-9])\/(\d+(?:\.\d{1,2})?)$/;
     const rawTransitions = scheduleValue.trim().split(/\s+/).sort();
 
-    if (rawTransitions.length > 6) {
+    if (rawTransitions.length > 12) {
         throw new Error(`Invalid schedule for ${dayName}: days must have no more than 6 transitions`);
     }
 
@@ -660,8 +762,8 @@ const getSonoffTrvzbtScheduleDayNames = (dayofweek: number): SonoffTrvzbtSchedul
     return sonoffTrvzbtScheduleDays.filter((day) => (dayofweek & (1 << getSonoffTrvzbtDayBit(day))) !== 0);
 };
 
-const buildSonoffTrvzbtSchedulePayload = (activeNum: number, dayofweek: number, transitions: SonoffTrvzbtScheduleTransition[]): number[] => {
-    const payload = [0x01, 0x01, activeNum, transitions.length, dayofweek, 0x01];
+const buildSonoffTrvzbtSchedulePayload = (scheduleNum: number, dayofweek: number, transitions: SonoffTrvzbtScheduleTransition[]): number[] => {
+    const payload = [0x01, 0x01, scheduleNum, transitions.length, dayofweek, 0x01];
     for (const transition of transitions) {
         payload.push(transition.transitionTime & 0xff, (transition.transitionTime >> 8) & 0xff);
         payload.push(transition.heatSetpoint & 0xff, (transition.heatSetpoint >> 8) & 0xff);
@@ -669,9 +771,12 @@ const buildSonoffTrvzbtSchedulePayload = (activeNum: number, dayofweek: number, 
     return payload;
 };
 
-const sendSonoffTrvzbtScheduleReadCommand = async (entity: Zh.Endpoint | Zh.Group, activeNum: number, reason: string): Promise<void> => {
-    const payload = [0x01, 0x00, activeNum];
-    logger.info(`TRV-ZBT ${reason} scheduleGroup activeNum=${activeNum} payload=${formatSonoffTrvzbtPayload(payload)}`, NS);
+const sendSonoffTrvzbtScheduleReadCommand = async (entity: Zh.Endpoint | Zh.Group, scheduleNum: number, reason: string): Promise<void> => {
+    const payload = [0x01, 0x00, scheduleNum];
+    logger.info(
+        `TRV-ZBT ${reason} scheduleGroup group=${toSonoffTrvzbtSchedulePublicGroup(scheduleNum)} payload=${formatSonoffTrvzbtPayload(payload)}`,
+        NS,
+    );
     await entity.command<"customSonoffTrvzbt", "scheduleGroup", SonoffTrvzbt>(
         "customSonoffTrvzbt",
         "scheduleGroup",
@@ -777,40 +882,20 @@ const tzLocal = {
         },
     } satisfies Tz.Converter,
     snzb_09p_alert: {
-        key: ["start_manual_alarm", "cancel_alarm", "start_scene_alarm", "siren_on"],
+        key: ["siren_on"],
         convertSet: async (entity, key, value, meta) => {
-            const state = meta.state || {};
             const device = meta.device;
+            const message = meta.message;
             if (!device) return;
             const endpoint = device.getEndpoint(1);
             if (!endpoint) return;
 
             let payload: Buffer;
-            switch (key) {
-                case "cancel_alarm":
-                    payload = Buffer.from([1]);
-                    break;
-                case "siren_on": {
-                    if (value === "OFF" || value === false) {
-                        payload = Buffer.from([1]);
-                        break;
-                    }
 
-                    const voice = state.alarm_sound_enable === "ON" || state.alarm_sound_enable === true ? 0x01 : 0x00;
-                    const light = state.alarm_light_enable === "ON" || state.alarm_light_enable === true ? 0x01 : 0x00;
-                    const alertSoundRaw = meta.message?.alarm_sound_type ?? state.alarm_sound_type ?? 0;
-                    const alertSoundParsed =
-                        typeof alertSoundRaw === "string" ? Number.parseInt(alertSoundRaw.replace(/^sound\s+/i, ""), 10) : Number(alertSoundRaw);
-                    const alertSound = Number.isFinite(alertSoundParsed) ? Math.min(9, Math.max(0, alertSoundParsed)) : 0;
-                    const volMap = {low: 0, medium: 1, high: 2, highest: 3} as const;
-                    const volumeLevel = String(state.alarm_volume_level ?? "high").toLowerCase();
-                    const volume = volMap[volumeLevel as keyof typeof volMap] ?? 2;
-                    const duration = Math.min(900, Math.max(1, Number(state.alarm_duration ?? 10)));
-                    payload = Buffer.from([0x02, 0x00, voice, light, alertSound, volume, duration & 0xff, (duration >> 8) & 0xff, 0x00]);
-                    break;
-                }
-                default:
-                    throw new Error(`Unsupported SNZB-09P alert command key '${key}'`);
+            if (message.siren_on === "ON") {
+                payload = Buffer.from([0]);
+            } else {
+                payload = Buffer.from([1]);
             }
 
             await endpoint.command<"customClusterEwelink", "alertCommand", SonoffSnzb09p>(
@@ -1604,7 +1689,9 @@ const sonoffExtend = {
     },
     trvzbtWeeklySchedule: (): ModernExtend => {
         const clusterName = "customSonoffTrvzbt";
-        const commandName = "scheduleGroup";
+        const scheduleGroupCommandName = "scheduleGroup";
+        const activeGroupKey = "schedule_active_group";
+        const selectedGroupKey = "schedule_group_to_edit";
         const scheduleDescription =
             'The preset heating schedule to use when the system mode is set to "auto" (indicated with ⏲ on the TRV). ' +
             "Up to 12 transitions can be defined per day, where a transition is expressed in the format 'HH:mm/temperature', each " +
@@ -1612,24 +1699,46 @@ const sonoffExtend = {
             "(in 0.5°C steps). The temperature will be set at the time of the first transition until the time of the next transition, " +
             "e.g. '04:00/20 10:00/25' will result in the temperature being set to 20°C at 04:00 until 10:00, when it will change to 25°C.";
 
-        const exposes = sonoffTrvzbtScheduleDays.map((day) =>
-            e.text(`weekly_schedule_${day}`, ea.ALL).withCategory("config").withDescription(scheduleDescription),
-        );
+        const scheduleKeysFromMessage = (message: Record<string, unknown> | null): string[] => {
+            return message
+                ? Object.keys(message).filter(
+                      (key) =>
+                          key.startsWith("weekly_schedule_") &&
+                          sonoffTrvzbtScheduleDays.includes(key.replace("weekly_schedule_", "") as SonoffTrvzbtScheduleDayName),
+                  )
+                : [];
+        };
+
+        const exposes = [
+            e
+                .enum(activeGroupKey, ea.ALL, Object.keys(sonoffTrvzbtScheduleGroupLookup))
+                .withCategory("config")
+                .withDescription("The schedule group currently used in Auto mode."),
+            e
+                .enum(selectedGroupKey, ea.ALL, Object.keys(sonoffTrvzbtScheduleGroupLookup))
+                .withCategory("config")
+                .withDescription("Select the schedule group to view or edit its weekly schedule settings."),
+            ...sonoffTrvzbtScheduleDays.map((day) =>
+                e.text(`weekly_schedule_${day}`, ea.ALL).withCategory("config").withDescription(scheduleDescription),
+            ),
+        ];
 
         const sendScheduleCommand = async (
             entity: Parameters<Tz.Converter["convertSet"]>[0],
-            activeNum: number,
+            scheduleNum: number,
             dayofweek: number,
             transitions: SonoffTrvzbtScheduleTransition[],
         ) => {
-            const payload = buildSonoffTrvzbtSchedulePayload(activeNum, dayofweek, transitions);
+            const payload = buildSonoffTrvzbtSchedulePayload(scheduleNum, dayofweek, transitions);
             logger.info(
-                `TRV-ZBT send scheduleGroup activeNum=${activeNum} dayofweek=0x${dayofweek.toString(16).padStart(2, "0")} transitions=${JSON.stringify(transitions)} payload=${formatSonoffTrvzbtPayload(payload)}`,
+                `TRV-ZBT send scheduleGroup group=${toSonoffTrvzbtSchedulePublicGroup(scheduleNum)} ` +
+                    `dayofweek=0x${dayofweek.toString(16).padStart(2, "0")} transitions=${JSON.stringify(transitions)} ` +
+                    `payload=${formatSonoffTrvzbtPayload(payload)}`,
                 NS,
             );
-            await entity.command<typeof clusterName, typeof commandName, SonoffTrvzbt>(
+            await entity.command<typeof clusterName, typeof scheduleGroupCommandName, SonoffTrvzbt>(
                 clusterName,
-                commandName,
+                scheduleGroupCommandName,
                 {data: payload},
                 disableDefaultResponseOptions,
             );
@@ -1641,14 +1750,21 @@ const sonoffExtend = {
                 type: ["attributeReport", "readResponse"],
                 convert: (model, msg) => {
                     if (msg.data.weeklyScheduleActiveNum === undefined) return;
-                    const activeNum = getValidSonoffTrvzbtScheduleActiveNum(msg.data.weeklyScheduleActiveNum);
+                    const activeNum = getValidSonoffTrvzbtScheduleGroupNum(msg.data.weeklyScheduleActiveNum);
                     if (activeNum === undefined) {
                         logger.warning(`TRV-ZBT received invalid weeklyScheduleActiveNum=${msg.data.weeklyScheduleActiveNum}`, NS);
                         return;
                     }
 
                     cacheSonoffTrvzbtScheduleActiveNum(activeNum, msg.endpoint, msg.device);
-                    logger.info(`TRV-ZBT received weeklyScheduleActiveNum=${activeNum}`, NS);
+                    const publicGroup = toSonoffTrvzbtSchedulePublicGroup(activeNum);
+                    logger.info(`TRV-ZBT received weeklyScheduleActiveNum=${publicGroup}`, NS);
+                    const result: KeyValueAny = {[activeGroupKey]: publicGroup};
+                    if (getCachedSonoffTrvzbtScheduleSelectedNum(msg.endpoint, msg.device) === undefined) {
+                        cacheSonoffTrvzbtScheduleSelectedNum(activeNum, msg.endpoint, msg.device);
+                        result[selectedGroupKey] = publicGroup;
+                    }
+                    return result;
                 },
             } satisfies Fz.Converter<typeof clusterName, SonoffTrvzbt, ["attributeReport", "readResponse"]>,
             {
@@ -1663,16 +1779,18 @@ const sonoffExtend = {
                     logger.info(`TRV-ZBT received scheduleGroup payload=${formatSonoffTrvzbtPayload(payload)}`, NS);
                     if (payload.length < 4 || payload[0] !== 0x01) return;
                     const readOrWrite = payload[1];
-                    const activeNum = payload[2];
+                    const scheduleNum = payload[2];
+                    if (getValidSonoffTrvzbtScheduleGroupNum(scheduleNum) === undefined) return;
 
                     if (readOrWrite === 0x01) {
                         const status = payload[3];
                         const statusText = status === 0x00 ? "success" : "fail";
                         logger.info(
-                            `TRV-ZBT parsed scheduleGroup write response activeNum=${activeNum} status=${statusText} rawStatus=0x${status.toString(16).padStart(2, "0")}`,
+                            `TRV-ZBT parsed scheduleGroup write response group=${toSonoffTrvzbtSchedulePublicGroup(scheduleNum)} ` +
+                                `status=${statusText} rawStatus=0x${status.toString(16).padStart(2, "0")}`,
                             NS,
                         );
-                        if (shouldMirrorSonoffTrvzbtActiveSchedule(activeNum, meta, msg.endpoint, msg.device)) {
+                        if (shouldMirrorSonoffTrvzbtSelectedSchedule(scheduleNum, meta, msg.endpoint, msg.device)) {
                             return {weekly_schedule_status: statusText};
                         }
                         return;
@@ -1708,11 +1826,14 @@ const sonoffExtend = {
 
                     const schedule = formatSonoffTrvzbtScheduleTransitions(transitions);
                     logger.info(
-                        `TRV-ZBT parsed scheduleGroup read response activeNum=${activeNum} dayofweek=0x${dayofweek.toString(16).padStart(2, "0")} mode=0x${mode.toString(16).padStart(2, "0")} transitions=${JSON.stringify(transitions)} schedule=${schedule}`,
+                        `TRV-ZBT parsed scheduleGroup read response group=${toSonoffTrvzbtSchedulePublicGroup(scheduleNum)} ` +
+                            `dayofweek=0x${dayofweek.toString(16).padStart(2, "0")} mode=0x${mode.toString(16).padStart(2, "0")} ` +
+                            `transitions=${JSON.stringify(transitions)} schedule=${schedule}`,
                         NS,
                     );
-                    if (!shouldMirrorSonoffTrvzbtActiveSchedule(activeNum, meta, msg.endpoint, msg.device)) return;
-                    const result: KeyValueAny = {};
+                    if (!shouldMirrorSonoffTrvzbtSelectedSchedule(scheduleNum, meta, msg.endpoint, msg.device)) return;
+                    cacheSonoffTrvzbtScheduleSelectedNum(scheduleNum, msg.endpoint, msg.device);
+                    const result: KeyValueAny = {[selectedGroupKey]: toSonoffTrvzbtSchedulePublicGroup(scheduleNum)};
                     for (const day of getSonoffTrvzbtScheduleDayNames(dayofweek)) {
                         result[`weekly_schedule_${day}`] = schedule;
                     }
@@ -1723,24 +1844,50 @@ const sonoffExtend = {
 
         const toZigbee: Tz.Converter[] = [
             {
+                key: [activeGroupKey],
+                convertSet: async (entity, key, value, meta) => {
+                    const publicGroup = assertSonoffTrvzbtSchedulePublicGroup(value, key);
+                    const activeNum = toSonoffTrvzbtScheduleInternalGroup(publicGroup);
+                    await entity.write<typeof clusterName, SonoffTrvzbt>(clusterName, {weeklyScheduleActiveNum: activeNum}, undefined);
+                    cacheSonoffTrvzbtScheduleActiveNum(activeNum, getSonoffTrvzbtEndpoint(entity), meta.device);
+                    return {state: {[key]: publicGroup}};
+                },
+                convertGet: async (entity) => {
+                    await entity.read<typeof clusterName, SonoffTrvzbt>(clusterName, ["weeklyScheduleActiveNum"]);
+                },
+            },
+            {
+                key: [selectedGroupKey],
+                convertSet: async (entity, key, value, meta) => {
+                    const publicGroup = assertSonoffTrvzbtSchedulePublicGroup(value, key);
+                    const selectedNum = toSonoffTrvzbtScheduleInternalGroup(publicGroup);
+                    cacheSonoffTrvzbtScheduleSelectedNum(selectedNum, getSonoffTrvzbtEndpoint(entity), meta.device);
+
+                    const message = meta.message as Record<string, unknown> | null;
+                    if (scheduleKeysFromMessage(message).length === 0) {
+                        await sendSonoffTrvzbtScheduleReadCommand(entity, selectedNum, "selected group read");
+                    }
+
+                    return {state: {[key]: publicGroup}};
+                },
+                convertGet: async (entity, key, meta) => {
+                    const selectedNum = getSonoffTrvzbtScheduleSelectedNum(getSonoffTrvzbtEndpoint(entity), meta.device);
+                    await sendSonoffTrvzbtScheduleReadCommand(entity, selectedNum, "selected group get");
+                },
+            },
+            {
                 key: sonoffTrvzbtScheduleDays.map((day) => `weekly_schedule_${day}`),
                 convertSet: async (entity, key, value, meta) => {
                     utils.assertString(value, key);
-                    const activeNum = await readSonoffTrvzbtScheduleActiveNum(entity, meta.device, "write scheduleGroup");
                     const message = meta.message as Record<string, unknown> | null;
-                    const scheduleKeys = message
-                        ? Object.keys(message).filter(
-                              (k) =>
-                                  k.startsWith("weekly_schedule_") &&
-                                  sonoffTrvzbtScheduleDays.includes(k.replace("weekly_schedule_", "") as SonoffTrvzbtScheduleDayName),
-                          )
-                        : [];
+                    const selectedNum = getSonoffTrvzbtScheduleNumFromMessage(entity, meta.device, message);
+                    const scheduleKeys = scheduleKeysFromMessage(message);
 
                     if (scheduleKeys.length <= 1) {
                         const dayName = key.replace("weekly_schedule_", "") as SonoffTrvzbtScheduleDayName;
                         const parsed = parseSonoffTrvzbtScheduleString(value, dayName);
-                        await sendScheduleCommand(entity, activeNum, 1 << getSonoffTrvzbtDayBit(dayName), parsed.transitions);
-                        return {state: {[key]: value}};
+                        await sendScheduleCommand(entity, selectedNum, 1 << getSonoffTrvzbtDayBit(dayName), parsed.transitions);
+                        return {state: {[selectedGroupKey]: toSonoffTrvzbtSchedulePublicGroup(selectedNum), [key]: value}};
                     }
 
                     const scheduleGroups = new Map<string, SonoffTrvzbtScheduleDayName[]>();
@@ -1751,7 +1898,7 @@ const sonoffExtend = {
                         scheduleGroups.set(schedule, [...(scheduleGroups.get(schedule) ?? []), dayName]);
                     }
 
-                    const stateUpdates: Record<string, string> = {};
+                    const stateUpdates: Record<string, string | number> = {[selectedGroupKey]: toSonoffTrvzbtSchedulePublicGroup(selectedNum)};
                     for (const [schedule, daysWithSchedule] of scheduleGroups) {
                         const parsed = parseSonoffTrvzbtScheduleString(schedule, daysWithSchedule.join(", "));
                         let dayofweek = 0;
@@ -1759,14 +1906,14 @@ const sonoffExtend = {
                             dayofweek |= 1 << getSonoffTrvzbtDayBit(dayName);
                             stateUpdates[`weekly_schedule_${dayName}`] = schedule;
                         }
-                        await sendScheduleCommand(entity, activeNum, dayofweek, parsed.transitions);
+                        await sendScheduleCommand(entity, selectedNum, dayofweek, parsed.transitions);
                     }
 
                     return {state: stateUpdates};
                 },
                 convertGet: async (entity, key, meta) => {
-                    const activeNum = await readSonoffTrvzbtScheduleActiveNum(entity, meta.device, "read scheduleGroup");
-                    await sendSonoffTrvzbtScheduleReadCommand(entity, activeNum, "send read");
+                    const selectedNum = getSonoffTrvzbtScheduleSelectedNum(getSonoffTrvzbtEndpoint(entity), meta.device);
+                    await sendSonoffTrvzbtScheduleReadCommand(entity, selectedNum, "send read");
                 },
             },
         ];
@@ -1809,6 +1956,33 @@ const sonoffExtend = {
                 key: [key],
                 convertGet: async (entity) => {
                     await entity.read<typeof clusterName, SonoffTrvzbt>(clusterName, ["faultCode"]);
+                },
+            },
+        ];
+
+        return {exposes, fromZigbee, toZigbee, isModernExtend: true};
+    },
+    motorTravelCalibrationStatus: (): ModernExtend => {
+        const clusterName = "customSonoffTrvzbt";
+        const key = "motor_travel_calibration_status";
+        const exposes = [e.text(key, ea.STATE_GET).withCategory("diagnostic").withDescription("Motor travel calibration status")];
+
+        const fromZigbee: Fz.Converter<typeof clusterName, SonoffTrvzbt, ["attributeReport", "readResponse"]>[] = [
+            {
+                cluster: clusterName,
+                type: ["attributeReport", "readResponse"],
+                convert: (model, msg) => {
+                    if (msg.data.motorTravelCalibrationStatus === undefined) return;
+                    return {[key]: formatMotorTravelCalibrationStatus(msg.data.motorTravelCalibrationStatus)};
+                },
+            },
+        ];
+
+        const toZigbee: Tz.Converter[] = [
+            {
+                key: [key],
+                convertGet: async (entity) => {
+                    await entity.read<typeof clusterName, SonoffTrvzbt>(clusterName, ["motorTravelCalibrationStatus"]);
                 },
             },
         ];
@@ -1890,7 +2064,7 @@ const sonoffExtend = {
                 .withFeature(
                     e
                         .numeric("duration", ea.ALL)
-                        .withValueMin(1)
+                        .withValueMin(0)
                         .withValueMax(1440)
                         .withValueStep(1)
                         .withUnit("minutes")
@@ -1936,7 +2110,7 @@ const sonoffExtend = {
                         delete temporaryMode.target_temperature;
                     }
                     if (msg.data.temporaryMode !== undefined) {
-                        temporaryMode.mode = utils.getFromLookupByValue(msg.data.temporaryMode, sonoffTrvzbtTemporaryModeLookup);
+                        temporaryMode.mode = utils.getFromLookupByValue(msg.data.temporaryMode, sonoffTrvzbtTemporaryModeLookup, null);
                     }
                     if (msg.data.temporaryModeTime !== undefined) {
                         utils.assertNumber(msg.data.temporaryModeTime);
@@ -1970,22 +2144,30 @@ const sonoffExtend = {
                     }
 
                     utils.assertNumber(value.duration, `${key}.duration`);
-                    validateRange(value.duration, `${key}.duration`, 0, 1440);
-                    utils.assertNumber(value.target_temperature, `${key}.target_temperature`);
-                    validateRange(
-                        value.target_temperature,
-                        `${key}.target_temperature`,
-                        sonoffTrvzbtTargetTemperatureRange.min,
-                        sonoffTrvzbtTargetTemperatureRange.max,
-                    );
+                    validateRange(value.duration, `${key}.duration`, 1, 1440);
 
                     const temporaryModeTime = Math.round(value.duration * 60);
-                    const temporaryModeTemp = Math.round(value.target_temperature * sonoffTrvzbtTemporaryModeTemperatureScale);
                     await entity.write<typeof clusterName, SonoffTrvzbt>(clusterName, {temporaryModeTime}, undefined);
-                    await entity.write<typeof clusterName, SonoffTrvzbt>(clusterName, {temporaryModeTemp}, undefined);
+
+                    if (mode === "timer") {
+                        utils.assertNumber(value.target_temperature, `${key}.target_temperature`);
+                        validateRange(
+                            value.target_temperature,
+                            `${key}.target_temperature`,
+                            sonoffTrvzbtTargetTemperatureRange.min,
+                            sonoffTrvzbtTargetTemperatureRange.max,
+                        );
+                        const temporaryModeTemp = Math.round(value.target_temperature * sonoffTrvzbtTemporaryModeTemperatureScale);
+                        await entity.write<typeof clusterName, SonoffTrvzbt>(clusterName, {temporaryModeTemp}, undefined);
+                    }
+
                     await entity.write<typeof clusterName, SonoffTrvzbt>(clusterName, {temporaryMode}, undefined);
 
-                    return {state: {[key]: {mode, duration: value.duration, target_temperature: value.target_temperature}}};
+                    const state: KeyValueAny = {mode, duration: value.duration};
+                    if (mode === "timer") {
+                        state.target_temperature = value.target_temperature;
+                    }
+                    return {state: {[key]: state}};
                 },
                 convertGet: async (entity) => {
                     await entity.read<typeof clusterName, SonoffTrvzbt>(clusterName, ["temporaryMode", "temporaryModeTime", "temporaryModeTemp"]);
@@ -2075,7 +2257,7 @@ const sonoffExtend = {
                     const values: number[] = [];
                     for (let offset = sonoffTrvzbtTemperatureControlHistoryValueOffset; offset + 1 < payload.length; offset += 2) {
                         const raw = payload.readInt16LE(offset);
-                        values.push(dataType === 0x01 ? raw : raw / 100);
+                        values.push(raw === -1 ? Number.NaN : raw / 10);
                     }
 
                     let state = sonoffTrvzbtTemperatureControlHistoryRespCache[respCacheKey];
@@ -5437,6 +5619,58 @@ const sonoffExtend = {
             isModernExtend: true,
         };
     },
+    faultCodeMiniZb1gs: (): ModernExtend => {
+        const clusterName = "customClusterEwelink" as const;
+        const attributeName = "faultCode" as const;
+
+        // 1GS only provides overheat detection.
+        const faultStates = [{name: "device_overheated", bit: 0b001}];
+
+        const exposes = faultStates.map((fault) => {
+            return e.binary(fault.name, ea.STATE_GET, "Alarm Active", "Normal").withCategory("diagnostic");
+        });
+
+        const fromZigbee: Fz.Converter<typeof clusterName, SonoffEwelink, ["attributeReport", "readResponse"]>[] = [
+            {
+                cluster: clusterName,
+                type: ["attributeReport", "readResponse"],
+                convert: (model, msg) => {
+                    if (msg.data.faultCode === undefined) return;
+
+                    const value = msg.data.faultCode;
+                    utils.assertNumber(value);
+
+                    const tlv = value >>> 0;
+                    const type = (tlv >>> 24) & 0xff;
+                    const length = (tlv >>> 16) & 0xff;
+                    if (type !== 0x07 || length !== 0x02) return;
+
+                    const faultValue = tlv & 0xffff;
+                    const result: KeyValue = {};
+                    for (const fault of faultStates) {
+                        result[fault.name] = (faultValue & fault.bit) !== 0 ? "Alarm Active" : "Normal";
+                    }
+                    return result;
+                },
+            },
+        ];
+
+        const toZigbee: Tz.Converter[] = [
+            {
+                key: faultStates.map((fault) => fault.name),
+                convertGet: async (entity) => {
+                    await entity.read<typeof clusterName, SonoffEwelink>(clusterName, [attributeName], defaultResponseOptions);
+                },
+            },
+        ];
+
+        return {
+            exposes,
+            fromZigbee,
+            toZigbee,
+            isModernExtend: true,
+        };
+    },
 };
 
 export const definitions: DefinitionWithExtend[] = [
@@ -5787,6 +6021,7 @@ export const definitions: DefinitionWithExtend[] = [
         model: "SNZB-02LD",
         vendor: "SONOFF",
         description: "Waterproof (IP65) sensor with screen and probe temperature detection",
+        ota: true,
         extend: [
             m.deviceAddCustomCluster("customSonoffSnzb02ld", {
                 name: "customSonoffSnzb02ld",
@@ -6762,9 +6997,10 @@ export const definitions: DefinitionWithExtend[] = [
                     weeklyScheduleActiveNum: {name: "weeklyScheduleActiveNum", ID: 0x601d, type: Zcl.DataType.UINT8, write: true, max: 0xff},
                     hvacMessageNotification: {name: "hvacMessageNotification", ID: 0x6030, type: Zcl.DataType.ARRAY},
                     heatPercentageHour: {name: "heatPercentageHour", ID: 0x6033, type: Zcl.DataType.UINT8, max: 0xff},
+                    motorTravelCalibration: {name: "motorTravelCalibration", ID: 0x6036, type: Zcl.DataType.BOOLEAN, write: true},
+                    motorTravelCalibrationStatus: {name: "motorTravelCalibrationStatus", ID: 0x6037, type: Zcl.DataType.UINT8, max: 0xff},
                 },
                 commands: {
-                    scheduleName: {name: "scheduleName", ID: 0x0b, parameters: [{name: "data", type: Zcl.BuffaloZclDataType.LIST_UINT8}]},
                     readTemperatureControlHistory: {
                         name: "readTemperatureControlHistory",
                         ID: 0x0e,
@@ -6956,6 +7192,15 @@ export const definitions: DefinitionWithExtend[] = [
                 unit: "%",
                 access: "STATE_GET",
             }),
+            m.enumLookup<"customSonoffTrvzbt", SonoffTrvzbt>({
+                name: "valve_travel_calibration",
+                lookup: {calibrate: 0x00},
+                cluster: "customSonoffTrvzbt",
+                attribute: "motorTravelCalibration",
+                entityCategory: "config",
+                description: "Calibrates the valve travel range to ensure accurate opening and closing control.",
+            }),
+            sonoffExtend.motorTravelCalibrationStatus(),
             sonoffExtend.trvzbtBluetoothPairing(),
             sonoffExtend.trvzbtTemperatureControlHistory(),
         ],
@@ -6969,7 +7214,7 @@ export const definitions: DefinitionWithExtend[] = [
             await endpoint.read("hvacThermostat", ["localTemperatureCalibration"]);
             const customAttributes = [
                 0x0000, 0x0010, 0x0021, 0x6000, 0x6002, 0x6003, 0x6004, 0x6005, 0x6006, 0x6007, 0x600b, 0x600c, 0x600d, 0x600e, 0x6011, 0x6013,
-                0x6014, 0x6015, 0x6016, 0x601c, 0x601d, 0x6033,
+                0x6014, 0x6015, 0x6016, 0x601c, 0x601d, 0x6033, 0x6037,
             ];
             const readCustomAttributes = async (attributes: number[]) => {
                 try {
@@ -9441,6 +9686,210 @@ export const definitions: DefinitionWithExtend[] = [
                 access: "ALL",
             }),
         ],
+        ota: true,
+    },
+    {
+        zigbeeModel: ["MINI-ZB1GS"],
+        model: "MINI-ZB1GS",
+        vendor: "SONOFF",
+        description: "Zigbee smart switch",
+        fromZigbee: [fz.on_off],
+        extend: [
+            m.deviceAddCustomCluster("customClusterEwelink", {
+                name: "customClusterEwelink",
+                ID: 0xfc11,
+                attributes: {
+                    networkLed: {name: "networkLed", ID: 0x0001, type: Zcl.DataType.BOOLEAN, write: true},
+                    faultCode: {name: "faultCode", ID: 0x0010, type: Zcl.DataType.UINT32},
+                    radioPower: {name: "radioPower", ID: 0x0012, type: Zcl.DataType.INT16, write: true},
+                    delayedPowerOnState: {name: "delayedPowerOnState", ID: 0x0014, type: Zcl.DataType.BOOLEAN, write: true},
+                    delayedPowerOnTime: {name: "delayedPowerOnTime", ID: 0x0015, type: Zcl.DataType.UINT16, write: true},
+                    externalTriggerMode: {name: "externalTriggerMode", ID: 0x0016, type: Zcl.DataType.UINT8, write: true},
+                    detachRelayMode2: {name: "detachRelayMode2", ID: 0x0019, type: Zcl.DataType.BITMAP8, write: true},
+                    detachRelayActionEvent: {name: "detachRelayActionEvent", ID: 0x0028, type: Zcl.DataType.UINT8},
+                },
+                commands: {
+                    protocolData: {name: "protocolData", ID: 0x01, parameters: [{name: "data", type: Zcl.BuffaloZclDataType.LIST_UINT8}]},
+                },
+                commandsResponse: {},
+            }),
+            m.onOff({
+                powerOnBehavior: true,
+                skipDuplicateTransaction: true,
+                configureReporting: true,
+            }),
+            m.binary<"customClusterEwelink", SonoffEwelink>({
+                name: "network_indicator",
+                cluster: "customClusterEwelink",
+                attribute: "networkLed",
+                description: "Turn the blue network status indicator on or off.",
+                entityCategory: "config",
+                valueOff: [false, 0],
+                valueOn: [true, 1],
+            }),
+            m.binary<"customClusterEwelink", SonoffEwelink>({
+                name: "turbo_mode",
+                cluster: "customClusterEwelink",
+                attribute: "radioPower",
+                description: "Boost Zigbee radio transmit power to improve range.",
+                entityCategory: "config",
+                valueOff: [false, 0x09],
+                valueOn: [true, 0x14],
+            }),
+            sonoffExtend.inchingControlSet(),
+            m.binary<"customClusterEwelink", SonoffEwelink>({
+                name: "delayed_power_on_state",
+                cluster: "customClusterEwelink",
+                attribute: "delayedPowerOnState",
+                description: "Restore the plug output after the configured power-on delay.",
+                entityCategory: "config",
+                valueOff: [false, 0],
+                valueOn: [true, 1],
+            }),
+            m.numeric<"customClusterEwelink", SonoffEwelink>({
+                name: "delayed_power_on_time",
+                cluster: "customClusterEwelink",
+                attribute: "delayedPowerOnTime",
+                description: "Delay before the plug output is restored after power returns.",
+                entityCategory: "config",
+                unit: "s",
+                scale: 2,
+                valueMin: 0.5,
+                valueMax: 3599.5,
+                valueStep: 0.5,
+            }),
+            sonoffExtend.externalSwitchTriggerMode(),
+            sonoffExtend.detachRelayModeControl(1),
+            sonoffExtend.detachRelayActionEvent(),
+            sonoffExtend.faultCodeMiniZb1gs(),
+        ],
+        ota: true,
+        configure: async (device, coordinatorEndpoint) => {
+            const endpoint = device.getEndpoint(1);
+            await reporting.bind(endpoint, coordinatorEndpoint, ["genOnOff", "customClusterEwelink"]);
+            await endpoint.read<"customClusterEwelink", SonoffEwelink>("customClusterEwelink", ["faultCode"], defaultResponseOptions);
+        },
+    },
+    {
+        zigbeeModel: ["SNZB-02UL"],
+        model: "SNZB-02UL",
+        vendor: "SONOFF",
+        description: "E-ink screen temperature and humidity sensor",
+        extend: [
+            m.deviceAddCustomCluster("customClusterEwelink", {
+                name: "customClusterEwelink",
+                ID: 0xfc11,
+                attributes: {
+                    comfortTemperatureMax: {name: "comfortTemperatureMax", ID: 0x0003, type: Zcl.DataType.INT16, write: true},
+                    comfortTemperatureMin: {name: "comfortTemperatureMin", ID: 0x0004, type: Zcl.DataType.INT16, write: true},
+                    comfortHumidityMin: {name: "comfortHumidityMin", ID: 0x0005, type: Zcl.DataType.UINT16, write: true},
+                    comfortHumidityMax: {name: "comfortHumidityMax", ID: 0x0006, type: Zcl.DataType.UINT16, write: true},
+                    temperatureUnits: {name: "temperatureUnits", ID: 0x0007, type: Zcl.DataType.UINT16, write: true},
+                    temperatureCalibration: {name: "temperatureCalibration", ID: 0x2003, type: Zcl.DataType.INT16, write: true},
+                    humidityCalibration: {name: "humidityCalibration", ID: 0x2004, type: Zcl.DataType.INT16, write: true},
+                },
+                commands: {},
+                commandsResponse: {},
+            }),
+            m.battery(),
+            m.temperature({valueMin: 0, valueMax: 50}),
+            m.humidity({valueMin: 5, valueMax: 95}),
+            m.bindCluster({cluster: "genPollCtrl", clusterType: "input"}),
+            m.numeric<"customClusterEwelink", SonoffSnzb02ul>({
+                name: "comfort_temperature_min",
+                cluster: "customClusterEwelink",
+                attribute: "comfortTemperatureMin",
+                entityCategory: "config",
+                description:
+                    "Minimum temperature that is considered comfortable. The device will display ❄️ when the temperature is lower than this value. Note: wake up the device by pressing the button on the back before changing this value.",
+                valueMin: 0,
+                valueMax: 50,
+                scale: 100,
+                valueStep: 0.1,
+                unit: "°C",
+            }),
+            m.numeric<"customClusterEwelink", SonoffSnzb02ul>({
+                name: "comfort_temperature_max",
+                cluster: "customClusterEwelink",
+                attribute: "comfortTemperatureMax",
+                entityCategory: "config",
+                description:
+                    "Maximum temperature that is considered comfortable. The device will display 🔥 when the temperature is higher than this value. Note: wake up the device by pressing the button on the back before changing this value.",
+                valueMin: 0,
+                valueMax: 50,
+                scale: 100,
+                valueStep: 0.1,
+                unit: "°C",
+            }),
+            m.enumLookup<"customClusterEwelink", SonoffSnzb02ul>({
+                name: "temperature_units",
+                lookup: {celsius: 0, fahrenheit: 1},
+                cluster: "customClusterEwelink",
+                attribute: "temperatureUnits",
+                entityCategory: "config",
+                description:
+                    "The unit of the temperature displayed on the device screen. Note: wake up the device by pressing the button on the back before changing this value.",
+            }),
+            m.numeric<"customClusterEwelink", SonoffSnzb02ul>({
+                name: "comfort_humidity_min",
+                cluster: "customClusterEwelink",
+                attribute: "comfortHumidityMin",
+                entityCategory: "config",
+                description:
+                    "Minimum relative humidity that is considered comfortable. The device will display ☀️ when the humidity is lower than this value. Note: wake up the device by pressing the button on the back before changing this value.",
+                valueMin: 5,
+                valueMax: 95,
+                scale: 100,
+                valueStep: 0.1,
+                unit: "%",
+            }),
+            m.numeric<"customClusterEwelink", SonoffSnzb02ul>({
+                name: "comfort_humidity_max",
+                cluster: "customClusterEwelink",
+                attribute: "comfortHumidityMax",
+                entityCategory: "config",
+                description:
+                    "Maximum relative humidity that is considered comfortable. The device will display 💧 when the humidity is higher than this value. Note: wake up the device by pressing the button on the back before changing this value.",
+                valueMin: 5,
+                valueMax: 95,
+                scale: 100,
+                valueStep: 0.1,
+                unit: "%",
+            }),
+            m.numeric<"customClusterEwelink", SonoffSnzb02ul>({
+                name: "temperature_calibration",
+                cluster: "customClusterEwelink",
+                attribute: "temperatureCalibration",
+                entityCategory: "config",
+                description:
+                    "Calibrated temperature target value (supports 0.1°C step). Note: wake up the device by pressing the button on the back before changing this value.",
+                valueMin: -50,
+                valueMax: 50,
+                scale: 100,
+                valueStep: 0.1,
+                unit: "°C",
+            }),
+            m.numeric<"customClusterEwelink", SonoffSnzb02ul>({
+                name: "humidity_calibration",
+                cluster: "customClusterEwelink",
+                attribute: "humidityCalibration",
+                entityCategory: "config",
+                description:
+                    "Calibrated relative humidity target value (supports 0.1% step). Note: wake up the device by pressing the button on the back before changing this value.",
+                valueMin: -95,
+                valueMax: 95,
+                scale: 100,
+                valueStep: 0.1,
+                unit: "%",
+            }),
+        ],
+        configure: async (device, coordinatorEndpoint) => {
+            const endpoint = device.getEndpoint(1);
+            if (!endpoint) {
+                throw new Error("Endpoint 1 not found");
+            }
+            await reporting.bind(endpoint, coordinatorEndpoint, ["genOnOff"]);
+        },
         ota: true,
     },
 ];
